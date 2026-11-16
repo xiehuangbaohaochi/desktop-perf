@@ -1,0 +1,11 @@
+# 本地设置与运行产物
+perf-settings.json
+perf.log
+*.lnk
+_*
+
+# Windows / 编辑器
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
