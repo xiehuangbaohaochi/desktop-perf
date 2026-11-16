@@ -4,7 +4,7 @@
     ------------------------------------------------------------
     透明浮层，实时显示 CPU / 内存 / GPU 占用。
 
-    · 点「内存」行  打开联想电脑管家（清理内存）
+    · 点「内存」行  打开本机电脑管家（自动识别厂商）
     · 点 CPU / GPU  打开任务管理器
     · 拖动          移动位置（自动记住）
     · 滚轮          调整不透明度
@@ -434,32 +434,86 @@ function Restore-Position {
 }
 
 # ---------------------------------------------------------------- 联想电脑管家
-$script:PcManagerPaths = @(
-    'C:\Program Files (x86)\Lenovo\PCManager\LenovoPcManager.exe',
-    'C:\Program Files\Lenovo\PCManager\LenovoPcManager.exe',
-    (Join-Path $env:ProgramFiles 'Lenovo\PCManager\LenovoPcManager.exe'),
-    (Join-Path ${env:ProgramFiles(x86)} 'Lenovo\PCManager\LenovoPcManager.exe')
-)
+$script:PcManagerCache = $null
 
-function Get-PcManagerPath {
-    foreach ($p in $script:PcManagerPaths) {
-        if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+function Get-PcManagerInfo {
+    if ($null -ne $script:PcManagerCache) { return $script:PcManagerCache }
+
+    $result = @{ Name = ''; Exe = $null }
+
+    # 1) 从卸载注册表里找常见电脑管家
+    $roots = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    )
+    $patterns = '电脑管家|PC ?Manager|PCManager|QQPCMgr|安全卫士|HipsMain'
+
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($k in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+            $prop = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+            if ($null -eq $prop -or [string]::IsNullOrWhiteSpace($prop.DisplayName)) { continue }
+            if ($prop.DisplayName -notmatch $patterns) { continue }
+
+            $exe = $null
+            if ($prop.DisplayIcon) {
+                $cand = ([string]$prop.DisplayIcon -split ',')[0].Trim('"')
+                if ($cand -match '\.exe$' -and (Test-Path -LiteralPath $cand)) { $exe = $cand }
+            }
+            if (-not $exe -and $prop.InstallLocation) {
+                foreach ($n in @('PcManager.exe', 'PCManager.exe', 'LenovoPcManager.exe', 'QQPCMgr.exe', '360Safe.exe', 'HipsMain.exe')) {
+                    $cand = Join-Path ([string]$prop.InstallLocation) $n
+                    if (Test-Path -LiteralPath $cand) { $exe = $cand; break }
+                }
+            }
+            if (-not $exe) { continue }
+
+            $name = [string]$prop.DisplayName
+            if ($name -match '联想|Lenovo') { $name = '联想电脑管家' }
+            elseif ($name -match '华为|Huawei') { $name = '华为电脑管家' }
+            elseif ($name -match '荣耀|Honor') { $name = '荣耀电脑管家' }
+            elseif ($name -match '小米|Xiaomi') { $name = '小米电脑管家' }
+            elseif ($name -match '腾讯|QQ') { $name = '腾讯电脑管家' }
+            elseif ($name -match '360') { $name = '360安全卫士' }
+            elseif ($name -match '火绒') { $name = '火绒安全' }
+
+            $result.Exe = $exe
+            $result.Name = $name
+            $script:PcManagerCache = $result
+            return $result
+        }
     }
-    return $null
+
+    # 2) 常见固定路径兜底
+    $known = @(
+        @{ N = '联想电脑管家'; P = 'C:\Program Files (x86)\Lenovo\PCManager\LenovoPcManager.exe' },
+        @{ N = '联想电脑管家'; P = 'C:\Program Files\Lenovo\PCManager\LenovoPcManager.exe' },
+        @{ N = '华为电脑管家'; P = 'C:\Program Files\Huawei\PCManager\PCManager.exe' },
+        @{ N = '荣耀电脑管家'; P = 'C:\Program Files\Honor\PCManager\PCManager.exe' },
+        @{ N = '小米电脑管家'; P = 'C:\Program Files\Xiaomi\PCManager\PCManager.exe' }
+    )
+    foreach ($item in $known) {
+        if (Test-Path -LiteralPath $item.P) {
+            $result.Exe = $item.P
+            $result.Name = $item.N
+            break
+        }
+    }
+
+    $script:PcManagerCache = $result
+    return $result
 }
 
 function Open-PcManager {
-    $exe = Get-PcManagerPath
-    if (-not $exe) {
-        [Windows.MessageBox]::Show('没有找到联想电脑管家（LenovoPcManager.exe）。', '此刻 · 性能监视', 'OK', 'Warning') | Out-Null
-        return
+    $info = Get-PcManagerInfo
+    if ($info.Exe) {
+        try { Start-Process -FilePath $info.Exe; return } catch { Write-Log "启动电脑管家失败: $_" }
     }
-    try {
-        Start-Process -FilePath $exe
-    } catch {
-        Write-Log "启动电脑管家失败: $_"
-    }
+    Start-Process taskmgr.exe
 }
+
+$script:ManagerName = (Get-PcManagerInfo).Name
 
 # ---------------------------------------------------------------- 开机自启
 $script:StartupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) '此刻性能监视.lnk'
@@ -643,7 +697,7 @@ function Show-Menu {
     $script:MenuPanel.Children.Clear()
 
     Add-MenuRow '立即刷新' { Update-Stats $true }
-    Add-MenuRow '打开联想电脑管家' { Open-PcManager }
+    Add-MenuRow $(if ($script:ManagerName) { '打开' + $script:ManagerName } else { '打开任务管理器' }) { Open-PcManager }
     Add-MenuRow '打开任务管理器' { Start-Process taskmgr.exe }
 
     Add-MenuSeparator
@@ -783,7 +837,7 @@ $RowCpu.Add_MouseEnter({ $HintText.Text = '点击打开任务管理器' })
 $RowCpu.Add_MouseLeave({ $HintText.Text = '' })
 $RowCpu.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Start-Process taskmgr.exe })
 
-$RowMem.Add_MouseEnter({ $HintText.Text = '点击打开联想电脑管家清理内存' })
+$RowMem.Add_MouseEnter({ $HintText.Text = if ($script:ManagerName) { '点击打开' + $script:ManagerName + '清理内存' } else { '点击打开任务管理器' } })
 $RowMem.Add_MouseLeave({ $HintText.Text = '' })
 $RowMem.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Open-PcManager })
 
